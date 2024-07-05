@@ -1,4 +1,5 @@
-REGISTRY ?= ghcr.io/k8snetworkplumbingwg
+#REGISTRY ?= ghcr.io/k8snetworkplumbingwg
+REGISTRY ?= registry.cloud.croc.ru/aleksefimov
 IMAGE_TAG ?= latest
 IMAGE_GIT_TAG ?= $(shell git describe --abbrev=8 --tags)
 
@@ -75,12 +76,12 @@ functest: $(GO)
 
 docker-build:
 	hack/get_version.sh > .version
-	$(OCI_BIN) build --build-arg goarch=${GOARCH} -t ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG} -f ./cmd/Dockerfile .
+	docker build --platform=linux/amd64 --build-arg goarch=${GOARCH} -t ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG} -f ./cmd/Dockerfile .
 
 docker-push:
-	$(OCI_BIN) push ${TLS_SETTING} ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG}
-	$(OCI_BIN) tag ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG} ${REGISTRY}/ovs-cni-plugin:${IMAGE_GIT_TAG}
-	$(OCI_BIN) push ${TLS_SETTING} ${REGISTRY}/ovs-cni-plugin:${IMAGE_GIT_TAG}
+	docker push ${TLS_SETTING} ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG}
+	#docker tag ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG} ${REGISTRY}/ovs-cni-plugin:${IMAGE_GIT_TAG}
+	#docker push ${TLS_SETTING} ${REGISTRY}/ovs-cni-plugin:${IMAGE_GIT_TAG}
 
 dep: $(GO)
 	$(GO) mod vendor
