@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"strings"
 
 	"github.com/ovn-org/libovsdb/client"
 	"github.com/ovn-org/libovsdb/model"
@@ -137,6 +138,11 @@ func NewOvsBridgeDriver(bridgeName, socketFile string) (*OvsBridgeDriver, error)
 
 // Wrapper for ovsDB transaction
 func (ovsd *OvsDriver) ovsdbTransact(ops []ovsdb.Operation) ([]ovsdb.OperationResult, error) {
+	// Debug: log the operations being sent
+	for i, op := range ops {
+		log.Printf("OVSDB Operation %d: Op=%s, Table=%s, UUIDName=%s", i+1, op.Op, op.Table, op.UUIDName)
+	}
+
 	// Perform OVSDB transaction
 	reply, _ := ovsd.ovsClient.Transact(context.Background(), ops...)
 
@@ -145,9 +151,9 @@ func (ovsd *OvsDriver) ovsdbTransact(ops []ovsdb.Operation) ([]ovsdb.OperationRe
 	}
 
 	// Parse reply and look for errors
-	for _, o := range reply {
+	for i, o := range reply {
 		if o.Error != "" {
-			return nil, errors.New("OVS Transaction failed err " + o.Error + " Details: " + o.Details)
+			return nil, fmt.Errorf("OVS Transaction failed err %s Details: %s (Operation %d: UUIDName=%s)", o.Error, o.Details, i+1, ops[i].UUIDName)
 		}
 	}
 
@@ -817,7 +823,8 @@ func (ovsd *OvsDriver) isMirrorExistsByConditions(conditions []ovsdb.Condition) 
 }
 
 func createInterfaceOperation(intfName string, ofportRequest uint, ovnPortName string, intfType string) (ovsdb.UUID, *ovsdb.Operation, error) {
-	intfUUIDStr := fmt.Sprintf("Intf%s", intfName)
+	intfUUIDStr := fmt.Sprintf("Intf%s", strings.ReplaceAll(intfName, "-", "_"))
+	log.Printf("Creating interface operation: intfName=%s, intfUUIDStr=%s", intfName, intfUUIDStr)
 	intfUUID := ovsdb.UUID{GoUUID: intfUUIDStr}
 
 	intf := make(map[string]interface{})
@@ -854,7 +861,8 @@ func createInterfaceOperation(intfName string, ofportRequest uint, ovnPortName s
 }
 
 func createPortOperation(intfName, contNetnsPath, contIfaceName string, vlanTag uint, trunks []uint, portType string, intfUUID ovsdb.UUID, contPodUid string) (ovsdb.UUID, *ovsdb.Operation, error) {
-	portUUIDStr := intfName
+	portUUIDStr := strings.ReplaceAll(intfName, "-", "_")
+	log.Printf("Creating port operation: intfName=%s, portUUIDStr=%s", intfName, portUUIDStr)
 	portUUID := ovsdb.UUID{GoUUID: portUUIDStr}
 
 	port := make(map[string]interface{})

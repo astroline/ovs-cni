@@ -15,8 +15,8 @@
 
 // Go version 1.10 or greater is required. Before that, switching namespaces in
 // long running processes in go did not work in a reliable way.
-//go:build go1.10
-// +build go1.10
+//go:build go1.10 || (darwin && cgo) || linux
+// +build go1.10 darwin,cgo linux
 
 package plugin
 
@@ -50,9 +50,10 @@ import (
 // EnvArgs args containing common, desired mac and ovs port name
 type EnvArgs struct {
 	cnitypes.CommonArgs
-	MAC         cnitypes.UnmarshallableString `json:"mac,omitempty"`
-	OvnPort     cnitypes.UnmarshallableString `json:"ovnPort,omitempty"`
-	K8S_POD_UID cnitypes.UnmarshallableString
+	MAC           cnitypes.UnmarshallableString `json:"mac,omitempty"`
+	OvnPort       cnitypes.UnmarshallableString `json:"ovnPort,omitempty"`
+	K8S_POD_UID   cnitypes.UnmarshallableString
+	HostInterface cnitypes.UnmarshallableString `json:"hostInterface,omitempty"`
 }
 
 func init() {
@@ -63,8 +64,8 @@ func init() {
 }
 
 func logCall(command string, args *skel.CmdArgs) {
-	log.Printf("CNI %s was called for container ID: %s, network namespace %s, interface name %s, configuration: %s",
-		command, args.ContainerID, args.Netns, args.IfName, string(args.StdinData[:]))
+	log.Printf("CNI %s was called for container ID: %s, network namespace %s, interface name %s, configuration: %s, env: %s",
+		command, args.ContainerID, args.Netns, args.IfName, string(args.StdinData[:]), args.Args)
 }
 
 func getEnvArgs(envArgsString string) (*EnvArgs, error) {
@@ -104,7 +105,7 @@ func IPAddrToHWAddr(ip net.IP) net.HardwareAddr {
 	return net.HardwareAddr{0x0A, 0x58, hash[0], hash[1], hash[2], hash[3]}
 }
 
-func setupVeth(contNetns ns.NetNS, contIfaceName string, requestedMac string, mtu int) (*current.Interface, *current.Interface, error) {
+func setupVeth(contNetns ns.NetNS, contIfaceName string, requestedMac string, mtu int, hostIfaceName string) (*current.Interface, *current.Interface, error) {
 	hostIface := &current.Interface{}
 	contIface := &current.Interface{}
 
@@ -112,7 +113,9 @@ func setupVeth(contNetns ns.NetNS, contIfaceName string, requestedMac string, mt
 	// this we will make sure that both ends of the veth pair will be removed
 	// when the container is gone.
 	err := contNetns.Do(func(hostNetns ns.NetNS) error {
-		hostVeth, containerVeth, err := ip.SetupVeth(contIfaceName, mtu, requestedMac, hostNetns)
+		log.Printf("Creating veth with hostIfaceName %v", hostIfaceName)
+		hostVeth, containerVeth, err := ip.SetupVethWithName(contIfaceName, hostIfaceName, mtu, requestedMac, hostNetns)
+		log.Printf("Created veth: %+v", hostVeth)
 		if err != nil {
 			return err
 		}
@@ -277,6 +280,10 @@ func CmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
+	if netconf.OvnPort != "" {
+		ovnPort = netconf.OvnPort
+	}
+
 	var vlanTagNum uint = 0
 	trunks := make([]uint, 0)
 	portType := "access"
@@ -353,7 +360,7 @@ func CmdAdd(args *skel.CmdArgs) error {
 			return err
 		}
 	} else {
-		hostIface, contIface, err = setupVeth(contNetns, args.IfName, mac, netconf.MTU)
+		hostIface, contIface, err = setupVeth(contNetns, args.IfName, mac, netconf.MTU, netconf.HostInterfaceName)
 		if err != nil {
 			return err
 		}
