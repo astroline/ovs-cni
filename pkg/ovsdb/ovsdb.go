@@ -829,13 +829,11 @@ func createInterfaceOperation(intfName string, ofportRequest uint, ovnPortName s
 	}
 
 	// Configure interface ID for ovn
-	if ovnPortName != "" {
-		oMap, err := ovsdb.NewOvsMap(map[string]string{"iface-id": ovnPortName})
-		if err != nil {
-			return ovsdb.UUID{}, nil, err
-		}
-		intf["external_ids"] = oMap
+	oMap, err := ovsdb.NewOvsMap(map[string]string{"iface-id": intfName})
+	if err != nil {
+		return ovsdb.UUID{}, nil, err
 	}
+	intf["external_ids"] = oMap
 
 	// Requested OpenFlow port number for this interface
 	if ofportRequest != 0 {
