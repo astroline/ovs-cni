@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: ovs-cni-amd64
-  namespace: kube-system
+  namespace: cluster-network-addons
   labels:
     tier: node
     app: ovs-cni
@@ -27,20 +27,21 @@ spec:
       nodeSelector:
         kubernetes.io/arch: amd64
         kubernetes.io/os: linux
+        node-role.kubernetes.io/cloud: cloud
       tolerations:
       - key: node-role.kubernetes.io/master
         operator: Exists
         effect: NoSchedule
       initContainers:
       - name: ovs-cni-plugin
-        image: ghcr.io/k8snetworkplumbingwg/ovs-cni-plugin:latest
+        image: registry.cloud.croc.ru/aleksefimov/ovs-cni-plugin:latest
         command: ["/bin/sh","-c"]
         args:
           - >
             cp /ovs /host/opt/cni/bin/ovs &&
             cp /ovs-mirror-producer /host/opt/cni/bin/ovs-mirror-producer &&
             cp /ovs-mirror-consumer /host/opt/cni/bin/ovs-mirror-consumer
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         securityContext:
           privileged: true
         resources:
@@ -53,7 +54,7 @@ spec:
       priorityClassName: system-node-critical
       containers:
       - name: ovs-cni-marker
-        image: ghcr.io/k8snetworkplumbingwg/ovs-cni-plugin:latest
+        image: registry.cloud.croc.ru/aleksefimov/ovs-cni-plugin:latest
         imagePullPolicy: IfNotPresent
         securityContext:
           privileged: true
@@ -96,6 +97,8 @@ spec:
         - name: ovs-var-run
           hostPath:
             path: /var/run/openvswitch
+      imagePullSecrets:
+        - name: regcred
 ---
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
@@ -123,10 +126,10 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: ovs-cni-marker
-  namespace: kube-system
+  namespace: cluster-network-addons
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: ovs-cni-marker
-  namespace: kube-system
+  namespace: cluster-network-addons
