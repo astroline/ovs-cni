@@ -1,10 +1,9 @@
-FROM quay.io/centos/centos:stream9 as builder
+FROM golang:1.21 as builder
 
 RUN mkdir /workdir
 WORKDIR /workdir
 
 COPY go.mod .
-RUN dnf install -y golang-$(sed -En 's/^go +(.*+)$/\1/p' go.mod).*
 
 COPY . .
 

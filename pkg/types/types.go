@@ -40,6 +40,7 @@ type NetConf struct {
 	SocketFile             string   `json:"socket_file"`
 	LinkStateCheckRetries  int      `json:"link_state_check_retries"`
 	LinkStateCheckInterval int      `json:"link_state_check_interval"`
+	HostInterfaceName      string   `json:"host_interface_name"`
 }
 
 // MirrorNetConf extends types.NetConf for ovs-mirrors
