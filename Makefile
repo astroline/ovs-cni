@@ -1,6 +1,6 @@
 #REGISTRY ?= ghcr.io/k8snetworkplumbingwg
-REGISTRY ?= registry.cloud.croc.ru/aleksefimov
-IMAGE_TAG ?= latest
+REGISTRY ?= registry.cloud.croc.ru/aleksefimov-public
+IMAGE_TAG ?= v0.1.0
 IMAGE_GIT_TAG ?= $(shell git describe --abbrev=8 --tags)
 
 COMPONENTS = $(sort \
@@ -29,6 +29,12 @@ TLS_SETTING := $(if $(filter $(OCI_BIN),podman),--tls-verify=false,)
 GO_BUILD_OPTS ?= CGO_ENABLED=0 GO111MODULE=on
 GO_TAGS ?= -tags no_openssl
 GO_FLAGS ?= -mod vendor
+
+# Helm settings
+OCI_REGISTRY ?= oci://registry.cloud.croc.ru/aleksefimov-public
+CHART_VERSION ?= 0.1.0
+CHART_NAME ?= ovs-cni
+HELM_OUTPUT_DIR ?= $(CURDIR)/build/_output/helm
 
 all: lint build
 
@@ -103,4 +109,10 @@ cluster-down:
 cluster-sync: build
 	./cluster/sync.sh
 
-.PHONY: build format test docker-build docker-push dep clean-dep manifests cluster-up cluster-down cluster-sync lint
+helm-chart-build:
+	helm package ./helm/ovs-cni -d ${HELM_OUTPUT_DIR} --version ${CHART_VERSION}
+
+helm-chart-push:
+	helm push ${HELM_OUTPUT_DIR}/ovs-cni-${CHART_VERSION}.tgz ${OCI_REGISTRY}/${CHART_NAME}
+
+.PHONY: build format test docker-build docker-push dep clean-dep manifests cluster-up cluster-down cluster-sync lint helm-chart-build helm-chart-push

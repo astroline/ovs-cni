@@ -1,0 +1,86 @@
+# Default values for ovs-cni.
+# This is a YAML-formatted file.
+#
+# IMPORTANT: Namespace is set via --namespace flag during helm install
+# Example: helm install ovs-cni . --namespace cluster-network-addons
+
+image:
+  repository: registry.cloud.croc.ru/kaas
+  name: ovs-cni-plugin
+  tag: latest
+  pullPolicy: IfNotPresent
+
+initImage:
+  repository: registry.cloud.croc.ru/kaas
+  name: ovs-cni-plugin
+  tag: latest
+  pullPolicy: IfNotPresent
+
+
+nodeSelector:
+  kubernetes.io/arch: amd64
+  kubernetes.io/os: linux
+
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+resources:
+  marker:
+    requests:
+      cpu: "10m"
+      memory: "10Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+  init:
+    requests:
+      cpu: "10m"
+      memory: "15Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+marker:
+  verbosity: 3
+  healthcheckInterval: 60
+
+livenessProbe:
+  initialDelaySeconds: 60
+  periodSeconds: 60
+
+readinessProbe:
+  initialDelaySeconds: 60
+  periodSeconds: 60
+
+serviceAccount:
+  create: true
+  name: ovs-cni-marker
+
+cniMountPath: /opt/cni/bin
+varRunPath: /var/run/openvswitch
+dbSocketName: db.sock
+
+rbac:
+  create: true
+
+imagePullSecrets:
+  - name: regcred
+
+priorityClassName: system-node-critical
+
+# allow customization of DaemonSet
+daemonset:
+  name: ovs-cni-amd64
+  labels:
+    tier: node
+    app: ovs-cni
+  annotations:
+    description: "OVS CNI allows users to attach their Pods/VMs to Open vSwitch bridges available on nodes"
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 30
