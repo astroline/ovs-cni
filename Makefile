@@ -1,5 +1,6 @@
-REGISTRY ?= ghcr.io/k8snetworkplumbingwg
-IMAGE_TAG ?= latest
+#REGISTRY ?= ghcr.io/k8snetworkplumbingwg
+REGISTRY ?= registry.cloud.croc.ru/aleksefimov-public
+IMAGE_TAG ?= v0.1.0
 IMAGE_GIT_TAG ?= $(shell git describe --abbrev=8 --tags)
 
 COMPONENTS = $(sort \
@@ -13,7 +14,7 @@ export GOROOT=$(BIN_DIR)/go/
 export GOBIN = $(GOROOT)/bin/
 export PATH := $(GOBIN):$(PATH):$(BIN_DIR)
 GOPATH = $(CURDIR)/.gopath
-GOARCH ?= amd64
+GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 ORG_PATH = github.com/k8snetworkplumbingwg
 PACKAGE = ovs-cni
 OCI_BIN ?= $(shell if podman ps >/dev/null 2>&1; then echo podman; elif docker ps >/dev/null 2>&1; then echo docker; fi)
@@ -23,6 +24,17 @@ PKGS = $(or $(PKG),$(shell cd $(BASE) && env GOPATH=$(GOPATH) $(GO) list ./... |
 V = 0
 Q = $(if $(filter 1,$V),,@)
 TLS_SETTING := $(if $(filter $(OCI_BIN),podman),--tls-verify=false,)
+
+# Go settings
+GO_BUILD_OPTS ?= CGO_ENABLED=0 GO111MODULE=on
+GO_TAGS ?= -tags no_openssl
+GO_FLAGS ?= -mod vendor
+
+# Helm settings
+OCI_REGISTRY ?= oci://registry.cloud.croc.ru/aleksefimov-public
+CHART_VERSION ?= 0.1.0
+CHART_NAME ?= ovs-cni
+HELM_OUTPUT_DIR ?= $(CURDIR)/build/_output/helm
 
 all: lint build
 
@@ -36,8 +48,8 @@ $(BASE): ; $(info  setting GOPATH...)
 	@ln -sf $(CURDIR) $@
 
 GOLANGCI = $(GOBIN)/golangci-lint
-$(GOBIN)/golangci-lint: | $(BASE) ; $(info  building golangci-lint...)
-	$Q go install -mod=mod github.com/golangci/golangci-lint/cmd/golangci-lint@v1.59.0
+$(GOBIN)/golangci-lint: $(GO) | $(BASE) ; $(info  building golangci-lint...)
+	$Q $(GO) install -mod=mod github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.6
 
 build: format $(patsubst %, build-%, $(COMPONENTS))
 
@@ -45,7 +57,7 @@ lint: $(GO) $(GOLANGCI)
 	$(GOLANGCI) run
 
 build-%: $(GO)
-	cd cmd/$* && $(GO) fmt && $(GO) vet && GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 GO111MODULE=on $(GO) build -tags no_openssl -mod vendor
+	cd cmd/$* && $(GO) fmt && $(GO) vet && GOOS=linux GOARCH=$(GOARCH) $(GO_BUILD_OPTS) $(GO) build $(GO_TAGS)
 
 format: $(GO)
 	$(GO) fmt ./pkg/... ./cmd/...
@@ -75,12 +87,12 @@ functest: $(GO)
 
 docker-build:
 	hack/get_version.sh > .version
-	$(OCI_BIN) build --build-arg goarch=${GOARCH} -t ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG} -f ./cmd/Dockerfile .
+	docker build --platform=linux/amd64 --build-arg goarch=${GOARCH} -t ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG} -f ./cmd/Dockerfile .
 
 docker-push:
-	$(OCI_BIN) push ${TLS_SETTING} ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG}
-	$(OCI_BIN) tag ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG} ${REGISTRY}/ovs-cni-plugin:${IMAGE_GIT_TAG}
-	$(OCI_BIN) push ${TLS_SETTING} ${REGISTRY}/ovs-cni-plugin:${IMAGE_GIT_TAG}
+	docker push ${TLS_SETTING} ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG}
+	#docker tag ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG} ${REGISTRY}/ovs-cni-plugin:${IMAGE_GIT_TAG}
+	#docker push ${TLS_SETTING} ${REGISTRY}/ovs-cni-plugin:${IMAGE_GIT_TAG}
 
 dep: $(GO)
 	$(GO) mod vendor
@@ -97,4 +109,10 @@ cluster-down:
 cluster-sync: build
 	./cluster/sync.sh
 
-.PHONY: build format test docker-build docker-push dep clean-dep manifests cluster-up cluster-down cluster-sync lint
+helm-chart-build:
+	helm package ./helm/ovs-cni -d ${HELM_OUTPUT_DIR} --version ${CHART_VERSION}
+
+helm-chart-push:
+	helm push ${HELM_OUTPUT_DIR}/ovs-cni-${CHART_VERSION}.tgz ${OCI_REGISTRY}/${CHART_NAME}
+
+.PHONY: build format test docker-build docker-push dep clean-dep manifests cluster-up cluster-down cluster-sync lint helm-chart-build helm-chart-push

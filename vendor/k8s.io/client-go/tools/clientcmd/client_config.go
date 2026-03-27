@@ -19,7 +19,6 @@ package clientcmd
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -30,8 +29,11 @@ import (
 	clientauth "k8s.io/client-go/tools/auth"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog/v2"
+)
 
-	"github.com/imdario/mergo"
+const (
+	// clusterExtensionKey is reserved in the cluster extensions list for exec plugin config.
+	clusterExtensionKey = "client.authentication.k8s.io/exec"
 )
 
 var (
@@ -68,11 +70,18 @@ type ClientConfig interface {
 	ConfigAccess() ConfigAccess
 }
 
+// OverridingClientConfig is used to enable overrriding the raw KubeConfig
+type OverridingClientConfig interface {
+	ClientConfig
+	// MergedRawConfig return the RawConfig merged with all overrides.
+	MergedRawConfig() (clientcmdapi.Config, error)
+}
+
 type PersistAuthProviderConfigForUser func(user string) restclient.AuthProviderConfigPersister
 
 type promptedCredentials struct {
 	username string
-	password string
+	password string `datapolicy:"password"`
 }
 
 // DirectClientConfig is a ClientConfig interface that is backed by a clientcmdapi.Config, options overrides, and an optional fallbackReader for auth information
@@ -87,22 +96,22 @@ type DirectClientConfig struct {
 }
 
 // NewDefaultClientConfig creates a DirectClientConfig using the config.CurrentContext as the context name
-func NewDefaultClientConfig(config clientcmdapi.Config, overrides *ConfigOverrides) ClientConfig {
+func NewDefaultClientConfig(config clientcmdapi.Config, overrides *ConfigOverrides) OverridingClientConfig {
 	return &DirectClientConfig{config, config.CurrentContext, overrides, nil, NewDefaultClientConfigLoadingRules(), promptedCredentials{}}
 }
 
 // NewNonInteractiveClientConfig creates a DirectClientConfig using the passed context name and does not have a fallback reader for auth information
-func NewNonInteractiveClientConfig(config clientcmdapi.Config, contextName string, overrides *ConfigOverrides, configAccess ConfigAccess) ClientConfig {
+func NewNonInteractiveClientConfig(config clientcmdapi.Config, contextName string, overrides *ConfigOverrides, configAccess ConfigAccess) OverridingClientConfig {
 	return &DirectClientConfig{config, contextName, overrides, nil, configAccess, promptedCredentials{}}
 }
 
 // NewInteractiveClientConfig creates a DirectClientConfig using the passed context name and a reader in case auth information is not provided via files or flags
-func NewInteractiveClientConfig(config clientcmdapi.Config, contextName string, overrides *ConfigOverrides, fallbackReader io.Reader, configAccess ConfigAccess) ClientConfig {
+func NewInteractiveClientConfig(config clientcmdapi.Config, contextName string, overrides *ConfigOverrides, fallbackReader io.Reader, configAccess ConfigAccess) OverridingClientConfig {
 	return &DirectClientConfig{config, contextName, overrides, fallbackReader, configAccess, promptedCredentials{}}
 }
 
 // NewClientConfigFromBytes takes your kubeconfig and gives you back a ClientConfig
-func NewClientConfigFromBytes(configBytes []byte) (ClientConfig, error) {
+func NewClientConfigFromBytes(configBytes []byte) (OverridingClientConfig, error) {
 	config, err := Load(configBytes)
 	if err != nil {
 		return nil, err
@@ -123,6 +132,40 @@ func RESTConfigFromKubeConfig(configBytes []byte) (*restclient.Config, error) {
 
 func (config *DirectClientConfig) RawConfig() (clientcmdapi.Config, error) {
 	return config.config, nil
+}
+
+// MergedRawConfig returns the raw kube config merged with the overrides
+func (config *DirectClientConfig) MergedRawConfig() (clientcmdapi.Config, error) {
+	if err := config.ConfirmUsable(); err != nil {
+		return clientcmdapi.Config{}, err
+	}
+	merged := config.config.DeepCopy()
+
+	// set the AuthInfo merged with overrides in the merged config
+	mergedAuthInfo, err := config.getAuthInfo()
+	if err != nil {
+		return clientcmdapi.Config{}, err
+	}
+	mergedAuthInfoName, _ := config.getAuthInfoName()
+	merged.AuthInfos[mergedAuthInfoName] = &mergedAuthInfo
+
+	// set the Context merged with overrides in the merged config
+	mergedContext, err := config.getContext()
+	if err != nil {
+		return clientcmdapi.Config{}, err
+	}
+	mergedContextName, _ := config.getContextName()
+	merged.Contexts[mergedContextName] = &mergedContext
+	merged.CurrentContext = mergedContextName
+
+	// set the Cluster merged with overrides in the merged config
+	configClusterInfo, err := config.getCluster()
+	if err != nil {
+		return clientcmdapi.Config{}, err
+	}
+	configClusterName, _ := config.getClusterName()
+	merged.Clusters[configClusterName] = &configClusterInfo
+	return *merged, nil
 }
 
 // ClientConfig implements ClientConfig
@@ -160,6 +203,8 @@ func (config *DirectClientConfig) ClientConfig() (*restclient.Config, error) {
 		clientConfig.Proxy = http.ProxyURL(u)
 	}
 
+	clientConfig.DisableCompression = configClusterInfo.DisableCompression
+
 	if config.overrides != nil && len(config.overrides.Timeout) > 0 {
 		timeout, err := ParseTimeout(config.overrides.Timeout)
 		if err != nil {
@@ -176,6 +221,7 @@ func (config *DirectClientConfig) ClientConfig() (*restclient.Config, error) {
 	if len(configAuthInfo.Impersonate) > 0 {
 		clientConfig.Impersonate = restclient.ImpersonationConfig{
 			UserName: configAuthInfo.Impersonate,
+			UID:      configAuthInfo.ImpersonateUID,
 			Groups:   configAuthInfo.ImpersonateGroups,
 			Extra:    configAuthInfo.ImpersonateUserExtra,
 		}
@@ -189,50 +235,42 @@ func (config *DirectClientConfig) ClientConfig() (*restclient.Config, error) {
 			authInfoName, _ := config.getAuthInfoName()
 			persister = PersisterForUser(config.configAccess, authInfoName)
 		}
-		userAuthPartialConfig, err := config.getUserIdentificationPartialConfig(configAuthInfo, config.fallbackReader, persister)
+		userAuthPartialConfig, err := config.getUserIdentificationPartialConfig(configAuthInfo, config.fallbackReader, persister, configClusterInfo)
 		if err != nil {
 			return nil, err
 		}
-		mergo.MergeWithOverwrite(clientConfig, userAuthPartialConfig)
+		if err := merge(clientConfig, userAuthPartialConfig); err != nil {
+			return nil, err
+		}
 
-		serverAuthPartialConfig, err := getServerIdentificationPartialConfig(configAuthInfo, configClusterInfo)
-		if err != nil {
+		serverAuthPartialConfig := getServerIdentificationPartialConfig(configClusterInfo)
+		if err := merge(clientConfig, serverAuthPartialConfig); err != nil {
 			return nil, err
 		}
-		mergo.MergeWithOverwrite(clientConfig, serverAuthPartialConfig)
 	}
 
 	return clientConfig, nil
 }
 
 // clientauth.Info object contain both user identification and server identification.  We want different precedence orders for
-// both, so we have to split the objects and merge them separately
-// we want this order of precedence for the server identification
-// 1.  configClusterInfo (the final result of command line flags and merged .kubeconfig files)
-// 2.  configAuthInfo.auth-path (this file can contain information that conflicts with #1, and we want #1 to win the priority)
-// 3.  load the ~/.kubernetes_auth file as a default
-func getServerIdentificationPartialConfig(configAuthInfo clientcmdapi.AuthInfo, configClusterInfo clientcmdapi.Cluster) (*restclient.Config, error) {
-	mergedConfig := &restclient.Config{}
+// both, so we have to split the objects and merge them separately.
 
-	// configClusterInfo holds the information identify the server provided by .kubeconfig
+// getServerIdentificationPartialConfig extracts server identification information from configClusterInfo
+// (the final result of command line flags and merged .kubeconfig files).
+func getServerIdentificationPartialConfig(configClusterInfo clientcmdapi.Cluster) *restclient.Config {
 	configClientConfig := &restclient.Config{}
 	configClientConfig.CAFile = configClusterInfo.CertificateAuthority
 	configClientConfig.CAData = configClusterInfo.CertificateAuthorityData
 	configClientConfig.Insecure = configClusterInfo.InsecureSkipTLSVerify
 	configClientConfig.ServerName = configClusterInfo.TLSServerName
-	mergo.MergeWithOverwrite(mergedConfig, configClientConfig)
 
-	return mergedConfig, nil
+	return configClientConfig
 }
 
-// clientauth.Info object contain both user identification and server identification.  We want different precedence orders for
-// both, so we have to split the objects and merge them separately
-// we want this order of precedence for user identification
-// 1.  configAuthInfo minus auth-path (the final result of command line flags and merged .kubeconfig files)
-// 2.  configAuthInfo.auth-path (this file can contain information that conflicts with #1, and we want #1 to win the priority)
-// 3.  if there is not enough information to identify the user, load try the ~/.kubernetes_auth file
-// 4.  if there is not enough information to identify the user, prompt if possible
-func (config *DirectClientConfig) getUserIdentificationPartialConfig(configAuthInfo clientcmdapi.AuthInfo, fallbackReader io.Reader, persistAuthConfig restclient.AuthProviderConfigPersister) (*restclient.Config, error) {
+// getUserIdentificationPartialConfig extracts user identification information from configAuthInfo
+// (the final result of command line flags and merged .kubeconfig files);
+// if the information available there is insufficient, it prompts (if possible) for additional information.
+func (config *DirectClientConfig) getUserIdentificationPartialConfig(configAuthInfo clientcmdapi.AuthInfo, fallbackReader io.Reader, persistAuthConfig restclient.AuthProviderConfigPersister, configClusterInfo clientcmdapi.Cluster) (*restclient.Config, error) {
 	mergedConfig := &restclient.Config{}
 
 	// blindly overwrite existing values based on precedence
@@ -240,7 +278,7 @@ func (config *DirectClientConfig) getUserIdentificationPartialConfig(configAuthI
 		mergedConfig.BearerToken = configAuthInfo.Token
 		mergedConfig.BearerTokenFile = configAuthInfo.TokenFile
 	} else if len(configAuthInfo.TokenFile) > 0 {
-		tokenBytes, err := ioutil.ReadFile(configAuthInfo.TokenFile)
+		tokenBytes, err := os.ReadFile(configAuthInfo.TokenFile)
 		if err != nil {
 			return nil, err
 		}
@@ -250,6 +288,7 @@ func (config *DirectClientConfig) getUserIdentificationPartialConfig(configAuthI
 	if len(configAuthInfo.Impersonate) > 0 {
 		mergedConfig.Impersonate = restclient.ImpersonationConfig{
 			UserName: configAuthInfo.Impersonate,
+			UID:      configAuthInfo.ImpersonateUID,
 			Groups:   configAuthInfo.ImpersonateGroups,
 			Extra:    configAuthInfo.ImpersonateUserExtra,
 		}
@@ -271,6 +310,7 @@ func (config *DirectClientConfig) getUserIdentificationPartialConfig(configAuthI
 	if configAuthInfo.Exec != nil {
 		mergedConfig.ExecProvider = configAuthInfo.Exec
 		mergedConfig.ExecProvider.InstallHint = cleanANSIEscapeCodes(mergedConfig.ExecProvider.InstallHint)
+		mergedConfig.ExecProvider.Config = configClusterInfo.Extensions[clusterExtensionKey]
 	}
 
 	// if there still isn't enough information to authenticate the user, try prompting
@@ -288,8 +328,12 @@ func (config *DirectClientConfig) getUserIdentificationPartialConfig(configAuthI
 		promptedConfig := makeUserIdentificationConfig(*promptedAuthInfo)
 		previouslyMergedConfig := mergedConfig
 		mergedConfig = &restclient.Config{}
-		mergo.MergeWithOverwrite(mergedConfig, promptedConfig)
-		mergo.MergeWithOverwrite(mergedConfig, previouslyMergedConfig)
+		if err := merge(mergedConfig, promptedConfig); err != nil {
+			return nil, err
+		}
+		if err := merge(mergedConfig, previouslyMergedConfig); err != nil {
+			return nil, err
+		}
 		config.promptedCredentials.username = mergedConfig.Username
 		config.promptedCredentials.password = mergedConfig.Password
 	}
@@ -297,7 +341,7 @@ func (config *DirectClientConfig) getUserIdentificationPartialConfig(configAuthI
 	return mergedConfig, nil
 }
 
-// makeUserIdentificationFieldsConfig returns a client.Config capable of being merged using mergo for only user identification information
+// makeUserIdentificationFieldsConfig returns a client.Config capable of being merged for only user identification information
 func makeUserIdentificationConfig(info clientauth.Info) *restclient.Config {
 	config := &restclient.Config{}
 	config.Username = info.User
@@ -457,12 +501,16 @@ func (config *DirectClientConfig) getContext() (clientcmdapi.Context, error) {
 
 	mergedContext := clientcmdapi.NewContext()
 	if configContext, exists := contexts[contextName]; exists {
-		mergo.MergeWithOverwrite(mergedContext, configContext)
+		if err := merge(mergedContext, configContext); err != nil {
+			return clientcmdapi.Context{}, err
+		}
 	} else if required {
 		return clientcmdapi.Context{}, fmt.Errorf("context %q does not exist", contextName)
 	}
 	if config.overrides != nil {
-		mergo.MergeWithOverwrite(mergedContext, config.overrides.Context)
+		if err := merge(mergedContext, &config.overrides.Context); err != nil {
+			return clientcmdapi.Context{}, err
+		}
 	}
 
 	return *mergedContext, nil
@@ -475,12 +523,16 @@ func (config *DirectClientConfig) getAuthInfo() (clientcmdapi.AuthInfo, error) {
 
 	mergedAuthInfo := clientcmdapi.NewAuthInfo()
 	if configAuthInfo, exists := authInfos[authInfoName]; exists {
-		mergo.MergeWithOverwrite(mergedAuthInfo, configAuthInfo)
+		if err := merge(mergedAuthInfo, configAuthInfo); err != nil {
+			return clientcmdapi.AuthInfo{}, err
+		}
 	} else if required {
 		return clientcmdapi.AuthInfo{}, fmt.Errorf("auth info %q does not exist", authInfoName)
 	}
 	if config.overrides != nil {
-		mergo.MergeWithOverwrite(mergedAuthInfo, config.overrides.AuthInfo)
+		if err := merge(mergedAuthInfo, &config.overrides.AuthInfo); err != nil {
+			return clientcmdapi.AuthInfo{}, err
+		}
 	}
 
 	return *mergedAuthInfo, nil
@@ -493,15 +545,21 @@ func (config *DirectClientConfig) getCluster() (clientcmdapi.Cluster, error) {
 
 	mergedClusterInfo := clientcmdapi.NewCluster()
 	if config.overrides != nil {
-		mergo.MergeWithOverwrite(mergedClusterInfo, config.overrides.ClusterDefaults)
+		if err := merge(mergedClusterInfo, &config.overrides.ClusterDefaults); err != nil {
+			return clientcmdapi.Cluster{}, err
+		}
 	}
 	if configClusterInfo, exists := clusterInfos[clusterInfoName]; exists {
-		mergo.MergeWithOverwrite(mergedClusterInfo, configClusterInfo)
+		if err := merge(mergedClusterInfo, configClusterInfo); err != nil {
+			return clientcmdapi.Cluster{}, err
+		}
 	} else if required {
 		return clientcmdapi.Cluster{}, fmt.Errorf("cluster %q does not exist", clusterInfoName)
 	}
 	if config.overrides != nil {
-		mergo.MergeWithOverwrite(mergedClusterInfo, config.overrides.ClusterInfo)
+		if err := merge(mergedClusterInfo, &config.overrides.ClusterInfo); err != nil {
+			return clientcmdapi.Cluster{}, err
+		}
 	}
 
 	// * An override of --insecure-skip-tls-verify=true and no accompanying CA/CA data should clear already-set CA/CA data
@@ -542,11 +600,12 @@ func (config *inClusterClientConfig) RawConfig() (clientcmdapi.Config, error) {
 }
 
 func (config *inClusterClientConfig) ClientConfig() (*restclient.Config, error) {
-	if config.inClusterConfigProvider == nil {
-		config.inClusterConfigProvider = restclient.InClusterConfig
+	inClusterConfigProvider := config.inClusterConfigProvider
+	if inClusterConfigProvider == nil {
+		inClusterConfigProvider = restclient.InClusterConfig
 	}
 
-	icc, err := config.inClusterConfigProvider()
+	icc, err := inClusterConfigProvider()
 	if err != nil {
 		return nil, err
 	}
@@ -566,7 +625,7 @@ func (config *inClusterClientConfig) ClientConfig() (*restclient.Config, error) 
 		}
 	}
 
-	return icc, err
+	return icc, nil
 }
 
 func (config *inClusterClientConfig) Namespace() (string, bool, error) {
@@ -577,7 +636,7 @@ func (config *inClusterClientConfig) Namespace() (string, bool, error) {
 	}
 
 	// Fall back to the namespace associated with the service account token, if available
-	if data, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+	if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
 		if ns := strings.TrimSpace(string(data)); len(ns) > 0 {
 			return ns, false, nil
 		}
@@ -605,7 +664,7 @@ func (config *inClusterClientConfig) Possible() bool {
 // to the default config.
 func BuildConfigFromFlags(masterUrl, kubeconfigPath string) (*restclient.Config, error) {
 	if kubeconfigPath == "" && masterUrl == "" {
-		klog.Warningf("Neither --kubeconfig nor --master was specified.  Using the inClusterConfig.  This might not work.")
+		klog.Warning("Neither --kubeconfig nor --master was specified.  Using the inClusterConfig.  This might not work.")
 		kubeconfig, err := restclient.InClusterConfig()
 		if err == nil {
 			return kubeconfig, nil

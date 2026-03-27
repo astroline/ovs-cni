@@ -1,11 +1,20 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: samplepod-1
+  name: samplepod-3
   annotations:
-    k8s.v1.cni.cncf.io/networks: ovs-net-vlan100
+    k8s.v1.cni.cncf.io/networks: |
+      [
+        {
+          "name": "ovs-net-1",
+          "ips": ["172.31.0.105/24"],
+          "host_interface_name": "veth12345678"
+        }
+      ]
 spec:
+  nodeSelector:
+    node-role.kubernetes.io/cloud: cloud
   containers:
-  - name: samplepod
-    command: ["sleep", "99999"]
-    image: fedora
+    - name: samplepod-3
+      command: ["sleep", "99999"]
+      image: alpine

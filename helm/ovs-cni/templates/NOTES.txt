@@ -1,0 +1,11 @@
+1. Install the chart with:
+   helm install my-release . --namespace cluster-network-addons --create-namespace
+
+2. Or use a custom namespace:
+   helm install my-release . --namespace my-namespace --create-namespace
+
+3. Check DaemonSet status:
+   kubectl get ds -n {{ .Release.Namespace }}
+
+4. Check pod logs:
+   kubectl logs -n {{ .Release.Namespace }} -l app=ovs-cni -f
